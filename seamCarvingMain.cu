@@ -123,12 +123,13 @@ void energyToColor(int *energy, uchar3 *colorPic, int width, int height, int max
     }
 }
 
-void hostEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels) {
+void hostEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
     GpuTimer timer;
     timer.Start();
 
     // Copy the input pixels to output pixels (initialization)
     memcpy(outPixels, inPixels, width * height * sizeof(uchar3));
+    memcpy(outPixelsColor, inPixels, width * height * sizeof(uchar3));
 
     // Memory allocation for energy and minimalEnergy arrays
     int *energy = (int *)malloc(width * height * sizeof(int));
@@ -145,19 +146,72 @@ void hostEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth
         }
     }
 
-    // Calculate minimal energy from bottom to top
-    calculateEnergyUpwards(energy, minimalEnergy, width, height);
+    while (width > desiredWidth) {
+      // Calculate energy from the beginning. (go from top to bottom)
+      calculateEnergyUpwards(energy, minimalEnergy, width, height);
 
-    // Find the maximum energy value
-    int maxEnergy = 0;
-    for (int i = 0; i < width * height; ++i) {
-        if (minimalEnergy[i] > maxEnergy) {
-            maxEnergy = minimalEnergy[i];
-        }
+      // Find the maximum energy value
+      int maxEnergy = 0;
+      for (int i = 0; i < width * height; ++i) {
+          if (minimalEnergy[i] > maxEnergy) {
+              maxEnergy = minimalEnergy[i];
+          }
+      }
+
+      // Convert energy values to colors for visualization
+      energyToColor(minimalEnergy, outPixelsColor, width, height, maxEnergy);
+
+      // find min index of first row
+      int minCol = 0, r = 0, prevMinCol;
+      for (int c = 1; c < width; ++c) {
+          if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+              minCol = c;
+      }
+
+      // Find and remove seam from first to last row
+      for (; r < height; ++r) {
+          // remove seam pixel on row r
+          for (int i = minCol; i < width - 1; ++i) {
+              outPixels[r * WIDTH + i] = outPixels[r * WIDTH + i + 1];
+              outPixelsColor[r * WIDTH + i] = outPixelsColor[r * WIDTH + i + 1];
+              grayPixels[r * WIDTH + i] = grayPixels[r * WIDTH + i + 1];
+              energy[r * WIDTH + i] = energy[r * WIDTH + i + 1];
+          }
+
+          // Update energy
+          if (r > 0) {
+              int affectedCol = max(0, prevMinCol - 2);
+
+              while (affectedCol <= prevMinCol + 2 && affectedCol < width - 1) {
+                  energy[(r - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, r - 1, affectedCol, width - 1, height);
+                  affectedCol += 1;
+              }
+          }
+
+          // find to the bottom
+          if (r < height - 1) {
+              prevMinCol = minCol;
+
+              int belowIdx = (r + 1) * WIDTH + minCol;
+              int min = minimalEnergy[belowIdx], minColCpy = minCol;
+              if (minColCpy > 0 && minimalEnergy[belowIdx - 1] < min) {
+                  min = minimalEnergy[belowIdx - 1];
+                  minCol = minColCpy - 1;
+              }
+              if (minColCpy < width - 1 && minimalEnergy[belowIdx + 1] < min) {
+                  minCol = minColCpy + 1;
+              }
+          }
+      }
+
+      int affectedCol;
+      for (affectedCol = max(0, minCol - 2); affectedCol <= minCol + 2 && affectedCol < width - 1; ++affectedCol) {
+          energy[(height - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, height - 1, affectedCol, width - 1, height);
+      }
+
+      --width;
     }
 
-    // Convert energy values to colors for visualization
-    energyToColor(minimalEnergy, outPixels, width, height, maxEnergy);
 
     // Free dynamically allocated memory
     free(grayPixels);
@@ -294,12 +348,49 @@ __global__ void energyToColorKernel(int *energy, uchar3 *colorPic, int width, in
     }
 }
 
-void deviceEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, dim3 blockSize) {
+__global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width, uchar3 *outPixelsColor) {
+    int row = blockIdx.x;
+    int baseIdx = row * d_WIDTH;
+    for (int i = leastSignificantPixel[row]; i < width - 1; ++i) {
+        outPixels[baseIdx + i] = outPixels[baseIdx + i + 1];
+        outPixelsColor[baseIdx + i] = outPixelsColor[baseIdx + i + 1];
+        grayPixels[baseIdx + i] = grayPixels[baseIdx + i + 1];
+        energy[baseIdx + i] = energy[baseIdx + i + 1];
+    }
+}
+
+void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
+    int minCol = 0, r = 0; // Bắt đầu từ hàng đầu tiên (0)
+
+    for (int c = 1; c < width; ++c)
+        if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+            minCol = c;
+    
+    for (; r < height; ++r) { // Bắt đầu từ hàng đầu tiên (0) và đi xuống dưới
+        leastSignificantPixel[r] = minCol;
+        if (r < height - 1) { // Kiểm tra không vượt quá chiều cao
+            int belowIdx = (r + 1) * WIDTH + minCol;
+            int min = minimalEnergy[belowIdx], minColCpy = minCol;
+
+            if (minColCpy > 0 && minimalEnergy[belowIdx - 1] < min) {
+                min = minimalEnergy[belowIdx - 1];
+                minCol = minColCpy - 1;
+            }
+            if (minColCpy < width - 1 && minimalEnergy[belowIdx + 1] < min) {
+                minCol = minColCpy + 1;
+            }
+        }
+    }
+}
+
+
+void deviceEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, dim3 blockSize, uchar3 *outPixelsColor) {
     // GPU timer initialization
     GpuTimer timer;
     timer.Start();
 
     // Device memory allocation
+
     uchar3 *d_inPixels, *d_outPixels;
     uint8_t *d_grayPixels;
     int *d_energy, *d_minimalEnergy;
@@ -309,8 +400,12 @@ void deviceEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWid
     CHECK(cudaMalloc(&d_energy, width * height * sizeof(int)));
     CHECK(cudaMalloc(&d_minimalEnergy, width * height * sizeof(int)));
 
+    int * d_leastSignificantPixel;
+    CHECK(cudaMalloc(&d_leastSignificantPixel, height * sizeof(int)));
+
     // Host memory allocation
     int *energy = (int *)malloc(width * height * sizeof(int));
+    int * leastSignificantPixel = (int *)malloc(height * sizeof(int));
     int *minimalEnergy = (int *)malloc(width * height * sizeof(int));
 
     // Dynamic shared memory size for energy computation
@@ -323,51 +418,82 @@ void deviceEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWid
 
     // Copy input to device
     CHECK(cudaMemcpy(d_inPixels, inPixels, width * height * sizeof(uchar3), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_outPixels, inPixels, width * height * sizeof(uchar3), cudaMemcpyHostToDevice));
 
     // Convert input image to grayscale on the device
     dim3 gridSize((width - 1) / blockSize.x + 1, (height - 1) / blockSize.y + 1);
-    convertRgb2GrayKernel<<<gridSize, blockSize>>>(d_inPixels, width, height, d_grayPixels);
-    cudaDeviceSynchronize();
-    CHECK(cudaGetLastError());
+    // convertRgb2GrayKernel<<<gridSize, blockSize>>>(d_inPixels, width, height, d_grayPixels);
+    // cudaDeviceSynchronize();
+    // CHECK(cudaGetLastError());
+    uint8_t * grayPixels = (uint8_t *)malloc((width) * height * sizeof(uint8_t));
+    uchar3 * tempPixels = (uchar3 *)malloc((width) * height * sizeof(uchar3));
 
-    // Update energy using Sobel filter on the grayscale image
-    calEnergy<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
-    cudaDeviceSynchronize();
-    CHECK(cudaGetLastError());
+    CHECK(cudaMemcpy(tempPixels, d_inPixels, (width) * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
+    
+    convertRgb2Gray_host(tempPixels, width, height, grayPixels);
 
-    // Compute minimal seam table upwards in parallel
-    for (int i = height - 1; i >= 0; i -= (stripHeight >> 1)) {
-        calculateEnergyUpwardsKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
+    CHECK(cudaMemcpy(d_grayPixels, grayPixels, (width) * height * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+    free(tempPixels);
+    free(grayPixels);
+
+
+    while (width > desiredWidth) {
+        // update energy
+        calEnergy<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
-    }
 
-    // Copy minimal energy table back to host memory to find max energy
-    CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
-    int maxEnergy = 0;
-    for (int i = 0; i < width * height; ++i) {
-        if (minimalEnergy[i] > maxEnergy) {
-            maxEnergy = minimalEnergy[i];
+        // Compute minimal seam table upwards in parallel
+        for (int i = height - 1; i >= 0; i -= (stripHeight >> 1)) {
+            calculateEnergyUpwardsKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
+            cudaDeviceSynchronize();
+            CHECK(cudaGetLastError());
         }
-    }
 
-    // Convert energy values to color representation
-    energyToColorKernel<<<gridSize, blockSize>>>(d_minimalEnergy, d_inPixels, width, height, maxEnergy);
-    cudaDeviceSynchronize();
-    CHECK(cudaGetLastError());
+        // Copy minimal energy table back to host memory to find max energy
+        CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
+        int maxEnergy = 0;
+        for (int i = 0; i < width * height; ++i) {
+            if (minimalEnergy[i] > maxEnergy) {
+                maxEnergy = minimalEnergy[i];
+            }
+        }
+        // Convert energy values to color representation
+        energyToColorKernel<<<gridSize, blockSize>>>(d_minimalEnergy, d_outPixels, width, height, maxEnergy);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
+        
+
+        // find least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
+        CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
+        findSeam(minimalEnergy, leastSignificantPixel, width, height);
+
+        // carve
+        CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
+        carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width, d_outPixels);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
+        
+        --width;
+    }
 
     // Copy processed pixels back to host memory
     CHECK(cudaMemcpy(outPixels, d_inPixels, WIDTH * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(outPixelsColor, d_outPixels, WIDTH * height * sizeof(uchar3), cudaMemcpyDeviceToHost));
+    
 
     // Free device memory
     CHECK(cudaFree(d_inPixels));
     CHECK(cudaFree(d_outPixels));
     CHECK(cudaFree(d_grayPixels));
+    CHECK(cudaFree(d_leastSignificantPixel));
     CHECK(cudaFree(d_energy));
     CHECK(cudaFree(d_minimalEnergy));
 
     // Free host memory
     free(minimalEnergy);
+    free(leastSignificantPixel);
     free(energy);
 
     // Stop timer and print the execution time for the device function
@@ -386,18 +512,22 @@ int main(int argc, char **argv) {
 
     // HOST: Perform energy calculation and color transformation on the CPU (host)
     uchar3 *out_host = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    hostEnergyToColor(inPixels, width, height, desiredWidth, out_host);
+    uchar3 *out_host_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
+    hostEnergyToColor(inPixels, width, height, desiredWidth, out_host, out_host_color);
 
     // DEVICE: Perform energy calculation and color transformation on the GPU (device)
     uchar3 *out_device = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    deviceEnergyToColor(inPixels, width, height, desiredWidth, out_device, blockSize);
+    uchar3 *out_device_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
+    deviceEnergyToColor(inPixels, width, height, desiredWidth, out_device, blockSize, out_device_color);
 
     // Compute error between device and host results
-    printError((char *)"Error between device result and host result: ", out_host, out_device, width, height);
+    printError((char *)"Error between device result and host result: ", out_host_color, out_device_color, width, height);
 
     // Write results to files
-    writePnm(out_host, width, height, width, concatStr(argv[2], "_energy_host.pnm"));
-    writePnm(out_device, width, height, width, concatStr(argv[2], "_energy_device.pnm"));
+    writePnm(out_host_color, desiredWidth, height, width, concatStr(argv[2], "_energy_host.pnm"));
+    writePnm(out_host, desiredWidth, height, width, concatStr(argv[2], "_host.pnm"));
+    writePnm(out_device, desiredWidth, height, width, concatStr(argv[2], "_device.pnm"));
+    writePnm(out_device_color, desiredWidth, height, width, concatStr(argv[2], "_energy_device.pnm"));
 
     // Free allocated memory
     free(inPixels);
