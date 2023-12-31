@@ -84,8 +84,8 @@ void calculateEnergyUpwards(int *energy, int *minimalEnergy, int width, int heig
     // Start from the second last row and compute minimalEnergy upwards
     for (int r = height - 2; r >= 0; --r) {
         for (int c = 0; c < width; ++c) {
-            int idx = r * width + c; // Current index in minimalEnergy
-            int belowIdx = (r + 1) * width + c; // Index of pixel directly below
+            int idx = r * WIDTH + c; // Current index in minimalEnergy
+            int belowIdx = (r + 1) * WIDTH  + c; // Index of pixel directly below
 
             int min = minimalEnergy[belowIdx]; // Initialize minimum energy with the pixel below
 
@@ -101,7 +101,6 @@ void calculateEnergyUpwards(int *energy, int *minimalEnergy, int width, int heig
         }
     }
 }
-
 
 void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
     int maxEnergy = 0; // Initialize maxEnergy
@@ -133,7 +132,7 @@ void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
     }
 }
 
-void hostEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
+void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
     GpuTimer timer;
     timer.Start();
 
@@ -177,6 +176,9 @@ void hostEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth
               grayPixels[r * WIDTH + i] = grayPixels[r * WIDTH + i + 1];
               energy[r * WIDTH + i] = energy[r * WIDTH + i + 1];
           }
+          // outPixelsColor[r * WIDTH + minCol].x = 255; // Red channel
+          // outPixelsColor[r * WIDTH + minCol].y = 0;   // Green channel
+          // outPixelsColor[r * WIDTH + minCol].z = 0;   // Blue channel
 
           // Update energy
           if (r > 0) {
@@ -309,8 +311,8 @@ __global__ void calculateEnergyUpwardsKernel(int *energy, int *minimalEnergy, in
 
             // Ensure within bounds and process only valid columns
             if (curCol >= 0 && curCol < width) {
-                int idx = curRow * width + curCol;
-                int belowIdx = (curRow + 1) * width + curCol;
+                int idx = curRow * d_WIDTH + curCol;
+                int belowIdx = (curRow + 1) * d_WIDTH + curCol;
 
                 int min = minimalEnergy[belowIdx]; // Initialize minimum energy with the pixel below
 
@@ -359,15 +361,15 @@ __global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, u
 }
 
 void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
-    int minCol = 0, r = 0; // Bắt đầu từ hàng đầu tiên (0)
+    int minCol = 0, r = 0; 
 
     for (int c = 1; c < width; ++c)
         if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
             minCol = c;
     
-    for (; r < height; ++r) { // Bắt đầu từ hàng đầu tiên (0) và đi xuống dưới
+    for (; r < height; ++r) { 
         leastSignificantPixel[r] = minCol;
-        if (r < height - 1) { // Kiểm tra không vượt quá chiều cao
+        if (r < height - 1) { 
             int belowIdx = (r + 1) * WIDTH + minCol;
             int min = minimalEnergy[belowIdx], minColCpy = minCol;
 
@@ -383,7 +385,7 @@ void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int he
 }
 
 
-void deviceEnergyToColor(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, dim3 blockSize, uchar3 *outPixelsColor) {
+void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, dim3 blockSize, uchar3 *outPixelsColor) {
     // GPU timer initialization
     GpuTimer timer;
     timer.Start();
@@ -524,12 +526,12 @@ int main(int argc, char **argv) {
     // HOST: Perform energy calculation and color transformation on the CPU (host)
     uchar3 *out_host = (uchar3 *)malloc(width * height * sizeof(uchar3));
     uchar3 *out_host_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    hostEnergyToColor(inPixels, width, height, desiredWidth, out_host, out_host_color);
+    hostSeamCarving(inPixels, width, height, desiredWidth, out_host, out_host_color);
 
     // DEVICE: Perform energy calculation and color transformation on the GPU (device)
     uchar3 *out_device = (uchar3 *)malloc(width * height * sizeof(uchar3));
     uchar3 *out_device_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    deviceEnergyToColor(inPixels, width, height, desiredWidth, out_device, blockSize, out_device_color);
+    deviceSeamCarving(inPixels, width, height, desiredWidth, out_device, blockSize, out_device_color);
 
     // Compute error between device and host results
     printError((char *)"Error between device color result and host color result: ", out_host_color, out_device_color, desiredWidth, height);
@@ -538,8 +540,8 @@ int main(int argc, char **argv) {
     // Write results to files
     writePnm(out_host_color, width, height, width, concatStr(argv[2], "_energy_host.pnm"));
     writePnm(out_host, desiredWidth, height, width, concatStr(argv[2], "_host.pnm"));
-    writePnm(out_device, desiredWidth, height, width, concatStr(argv[2], "_device.pnm"));
     writePnm(out_device_color, width, height, width, concatStr(argv[2], "_energy_device.pnm"));
+    writePnm(out_device, desiredWidth, height, width, concatStr(argv[2], "_device.pnm"));
 
     // Free allocated memory
     free(inPixels);
