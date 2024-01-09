@@ -11,39 +11,39 @@ int xSobel[3][3] = {{1, 0, -1}, {2, 0, -2}, {1, 0, -1}};
 int ySobel[3][3] = {{1, 2, 1}, {0, 0, 0}, {-1, -2, -1}};
 
 
-void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixels, int &desiredWidth, dim3 &blockSize) {
-    // Checking the number of arguments
+void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixels, int &targetedWidth, dim3 &blockSize) {
+    // Check the number of arguments
     if (argc != 4 && argc != 6) {
         printf("The number of arguments is invalid\n");
         exit(EXIT_FAILURE);
     }
 
-    // Read file
+    // Read the file
     readPnm(argv[1], width, height, inPixels);
     printf("Image size (width x height): %i x %i\n\n", width, height);
 
-    WIDTH = width; // Assigning width
-    // Check user's desired width
-    desiredWidth = atoi(argv[3]); // Convert user input to integer
+    WIDTH = width; // Assign the width
+    // Check the width that the user wants to reach
+    targetedWidth = atoi(argv[3]); // Convert user's input to integer
 
-    // Validate user's desired width
-    if (desiredWidth <= 0 || desiredWidth >= width) {
-        printf("Your desired width must be between 0 and the current picture's width!\n");
+    // Validate user's chosen width
+    if (targetedWidth <= 0 || targetedWidth >= width) {
+        printf("Your chosen width must be between 0 and the current picture's width!\n");
         exit(EXIT_FAILURE);
     }
 
-    // Block size handling
+    // Handle block size
     if (argc == 6) {
         blockSize.x = atoi(argv[4]); // Set block x-size
         blockSize.y = atoi(argv[5]); // Set block y-size
     } 
 
-    // Checking if the GPU is functioning properly
+    // Check if the GPU functions properly
     printDeviceInfo();
 }
 
 // HOST
-int getPixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height) {
+int measurePixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height) {
     int x_kernel = 0; // Initialize variable to store x-axis convolution result
     int y_kernel = 0; // Initialize variable to store y-axis convolution result
 
@@ -66,7 +66,7 @@ int getPixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height)
     return abs(x_kernel) + abs(y_kernel); // Calculate energy by summing absolute values of the convolutions
 }
 
-void calculateEnergyUpwards(int *energy, int *minimalEnergy, int width, int height) {
+void measureEnergyUps(int *energy, int *minimalEnergy, int width, int height) {
     // Copy the bottom row of energy to minimalEnergy
     int lastRowIdx = (height - 1) * width;
     for (int c = 0; c < width; ++c) {
@@ -94,7 +94,7 @@ void calculateEnergyUpwards(int *energy, int *minimalEnergy, int width, int heig
     }
 }
 
-void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
+void colorizeEnergy(int *energy, uchar3 *colorPic, int width, int height) {
     int maxEnergy = 0; // Initialize maxEnergy
 
     // Find the maximum energy value
@@ -124,7 +124,7 @@ void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
     }
 }
 
-void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
+void seamCarveHost(uchar3 *inPixels, int width, int height, int targetedWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
     GpuTimer timer;
     timer.Start();
 
@@ -143,15 +143,15 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
     // Calculate energy for all pixels in the image
     for (int r = 0; r < height; ++r) {
         for (int c = 0; c < width; ++c) {
-            energy[r * WIDTH + c] = getPixelEnergy(grayPixels, r, c, width, height);
+            energy[r * WIDTH + c] = measurePixelEnergy(grayPixels, r, c, width, height);
         }
     }
-    calculateEnergyUpwards(energy, minimalEnergy, width, height);
-    energyToColor(minimalEnergy, outPixelsColor, width, height);
+    measureEnergyUps(energy, minimalEnergy, width, height);
+    colorizeEnergy(minimalEnergy, outPixelsColor, width, height);
 
-    while (width > desiredWidth) {
+    while (width > targetedWidth) {
       // Calculate energy from the beginning. (go from top to bottom)
-      calculateEnergyUpwards(energy, minimalEnergy, width, height);
+      measureEnergyUps(energy, minimalEnergy, width, height);
 
       // find min index of first row
       int minCol = 0, r = 0, prevMinCol;
@@ -168,16 +168,13 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
               grayPixels[r * WIDTH + i] = grayPixels[r * WIDTH + i + 1];
               energy[r * WIDTH + i] = energy[r * WIDTH + i + 1];
           }
-          // outPixelsColor[r * WIDTH + minCol].x = 255; // Red channel
-          // outPixelsColor[r * WIDTH + minCol].y = 0;   // Green channel
-          // outPixelsColor[r * WIDTH + minCol].z = 0;   // Blue channel
 
           // Update energy
           if (r > 0) {
               int affectedCol = max(0, prevMinCol - 2);
 
               while (affectedCol <= prevMinCol + 2 && affectedCol < width - 1) {
-                  energy[(r - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, r - 1, affectedCol, width - 1, height);
+                  energy[(r - 1) * WIDTH + affectedCol] = measurePixelEnergy(grayPixels, r - 1, affectedCol, width - 1, height);
                   affectedCol += 1;
               }
           }
@@ -200,7 +197,7 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
 
       int affectedCol;
       for (affectedCol = max(0, minCol - 2); affectedCol <= minCol + 2 && affectedCol < width - 1; ++affectedCol) {
-          energy[(height - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, height - 1, affectedCol, width - 1, height);
+          energy[(height - 1) * WIDTH + affectedCol] = measurePixelEnergy(grayPixels, height - 1, affectedCol, width - 1, height);
       }
 
       --width;
@@ -221,24 +218,24 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
 
 // Main
 int main(int argc, char **argv) {
-    int width, height, desiredWidth;
+    int width, height, targetedWidth;
     uchar3 *inPixels;
     dim3 blockSize(32, 32);
 
     // Check user's input
-    checkInput(argc, argv, width, height, inPixels, desiredWidth, blockSize);
+    checkInput(argc, argv, width, height, inPixels, targetedWidth, blockSize);
 
     // HOST: Perform energy calculation and color transformation on the CPU (host)
     uchar3 *out_host = (uchar3 *)malloc(width * height * sizeof(uchar3));
     uchar3 *out_host_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    hostSeamCarving(inPixels, width, height, desiredWidth, out_host, out_host_color);
+    seamCarveHost(inPixels, width, height, targetedWidth, out_host, out_host_color);
 
     // Write results to files
     printf("\nImage color energy output size (width x height): %i x %i\n", width, height);
     writePnm(out_host_color, width, height, width, concatStr(argv[2], "_energy_host.pnm"));
 
-    printf("\nImage output size (width x height): %i x %i\n", desiredWidth, height);
-    writePnm(out_host, desiredWidth, height, width, concatStr(argv[2], "_host.pnm"));
+    printf("\nImage output size (width x height): %i x %i\n", targetedWidth, height);
+    writePnm(out_host, targetedWidth, height, width, concatStr(argv[2], "_host.pnm"));
 
     // Free allocated memory
     free(inPixels);

@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "./src/library.h"
 using namespace std;
+#define BLOCK_SIZE 32
 
 // Global variables
 int WIDTH;  // Width variable
@@ -17,41 +18,41 @@ __constant__ int d_ySobel[9] = {1, 2, 1, 0, 0, 0, -1, -2, -1};
 
 const int filterWidth = 3;  // Width of the filter
 
-void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixels, int &desiredWidth, dim3 &blockSize) {
-    // Checking the number of arguments
+void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixels, int &targetedWidth, dim3 &blockSize) {
+    // Check the number of arguments
     if (argc != 4 && argc != 6) {
         printf("The number of arguments is invalid\n");
         exit(EXIT_FAILURE);
     }
 
-    // Read file
+    // Read the file
     readPnm(argv[1], width, height, inPixels);
     printf("Image size (width x height): %i x %i\n\n", width, height);
 
     WIDTH = width; // Assigning width
     CHECK(cudaMemcpyToSymbol(d_WIDTH, &width, sizeof(int))); // Copy width to device constant
 
-    // Check user's desired width
-    desiredWidth = atoi(argv[3]); // Convert user input to integer
+    // Check user's chosen width
+    targetedWidth = atoi(argv[3]); // Convert user input to integer
 
-    // Validate user's desired width
-    if (desiredWidth <= 0 || desiredWidth >= width) {
-        printf("Your desired width must be between 0 and the current picture's width!\n");
+    // Validate user's chosen width
+    if (targetedWidth <= 0 || targetedWidth >= width) {
+        printf("Your chosen width must be between 0 and the current picture's width!\n");
         exit(EXIT_FAILURE);
     }
 
-    // Block size handling
+    // Handle block size
     if (argc == 6) {
         blockSize.x = atoi(argv[4]); // Set block x-size
         blockSize.y = atoi(argv[5]); // Set block y-size
     } 
 
-    // Checking if the GPU is functioning properly
+    // Check if the GPU functions properly
     printDeviceInfo();
 }
 
 // HOST
-int getPixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height) {
+int measurePixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height) {
     int x_kernel = 0; // Initialize variable to store x-axis convolution result
     int y_kernel = 0; // Initialize variable to store y-axis convolution result
 
@@ -74,35 +75,35 @@ int getPixelEnergy(uint8_t *grayPixels, int row, int col, int width, int height)
     return abs(x_kernel) + abs(y_kernel); // Calculate energy by summing absolute values of the convolutions
 }
 
-void calculateEnergyUpwards(int *energy, int *minimalEnergy, int width, int height) {
-    // Copy the bottom row of energy to minimalEnergy
+void measureEnergyUps(int *energy, int *minEnergy, int width, int height) {
+    // Copy the bottom row of energy to minEnergy
     int lastRowIdx = (height - 1) * width;
     for (int c = 0; c < width; ++c) {
-        minimalEnergy[lastRowIdx + c] = energy[lastRowIdx + c];
+        minEnergy[lastRowIdx + c] = energy[lastRowIdx + c];
     }
 
-    // Start from the second last row and compute minimalEnergy upwards
+    // Start from the second last row and compute minEnergy upwards
     for (int r = height - 2; r >= 0; --r) {
         for (int c = 0; c < width; ++c) {
-            int idx = r * WIDTH + c; // Current index in minimalEnergy
+            int idx = r * WIDTH + c; // Current index in minEnergy
             int belowIdx = (r + 1) * WIDTH  + c; // Index of pixel directly below
 
-            int min = minimalEnergy[belowIdx]; // Initialize minimum energy with the pixel below
+            int min = minEnergy[belowIdx]; // Initialize minimum energy with the pixel below
 
             // Check energy values of neighboring pixels below and update minimum if necessary
-            if (c > 0 && minimalEnergy[belowIdx - 1] < min) {
-                min = minimalEnergy[belowIdx - 1];
+            if (c > 0 && minEnergy[belowIdx - 1] < min) {
+                min = minEnergy[belowIdx - 1];
             }
-            if (c < width - 1 && minimalEnergy[belowIdx + 1] < min) {
-                min = minimalEnergy[belowIdx + 1];
+            if (c < width - 1 && minEnergy[belowIdx + 1] < min) {
+                min = minEnergy[belowIdx + 1];
             }
 
-            minimalEnergy[idx] = min + energy[idx]; // Update minimalEnergy for the current pixel
+            minEnergy[idx] = min + energy[idx]; // Update minEnergy for the current pixel
         }
     }
 }
 
-void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
+void colorizeEnergy(int *energy, uchar3 *colorPic, int width, int height) {
     int maxEnergy = 0; // Initialize maxEnergy
 
     // Find the maximum energy value
@@ -132,7 +133,7 @@ void energyToColor(int *energy, uchar3 *colorPic, int width, int height) {
     }
 }
 
-void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
+void seamCarveHost(uchar3 *inPixels, int width, int height, int targetedWidth, uchar3 *outPixels, uchar3 *outPixelsColor) {
     GpuTimer timer;
     timer.Start();
 
@@ -140,9 +141,9 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
     memcpy(outPixels, inPixels, width * height * sizeof(uchar3));
     memcpy(outPixelsColor, inPixels, width * height * sizeof(uchar3));
 
-    // Memory allocation for energy and minimalEnergy arrays
+    // Memory allocation for energy and minEnergy arrays
     int *energy = (int *)malloc(width * height * sizeof(int));
-    int *minimalEnergy = (int *)malloc(width * height * sizeof(int));
+    int *minEnergy = (int *)malloc(width * height * sizeof(int));
     
     // Memory allocation and conversion of input RGB pixels to grayscale
     uint8_t *grayPixels = (uint8_t *)malloc(width * height * sizeof(uint8_t));
@@ -151,20 +152,20 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
     // Calculate energy for all pixels in the image
     for (int r = 0; r < height; ++r) {
         for (int c = 0; c < width; ++c) {
-            energy[r * WIDTH + c] = getPixelEnergy(grayPixels, r, c, width, height);
+            energy[r * WIDTH + c] = measurePixelEnergy(grayPixels, r, c, width, height);
         }
     }
-    calculateEnergyUpwards(energy, minimalEnergy, width, height);
-    energyToColor(minimalEnergy, outPixelsColor, width, height);
+    measureEnergyUps(energy, minEnergy, width, height);
+    colorizeEnergy(minEnergy, outPixelsColor, width, height);
 
-    while (width > desiredWidth) {
+    while (width > targetedWidth) {
       // Calculate energy from the beginning. (go from top to bottom)
-      calculateEnergyUpwards(energy, minimalEnergy, width, height);
+      measureEnergyUps(energy, minEnergy, width, height);
 
       // find min index of first row
       int minCol = 0, r = 0, prevMinCol;
       for (int c = 1; c < width; ++c) {
-          if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+          if (minEnergy[r * WIDTH + c] < minEnergy[r * WIDTH + minCol])
               minCol = c;
       }
 
@@ -176,16 +177,13 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
               grayPixels[r * WIDTH + i] = grayPixels[r * WIDTH + i + 1];
               energy[r * WIDTH + i] = energy[r * WIDTH + i + 1];
           }
-          // outPixelsColor[r * WIDTH + minCol].x = 255; // Red channel
-          // outPixelsColor[r * WIDTH + minCol].y = 0;   // Green channel
-          // outPixelsColor[r * WIDTH + minCol].z = 0;   // Blue channel
 
           // Update energy
           if (r > 0) {
               int affectedCol = max(0, prevMinCol - 2);
 
               while (affectedCol <= prevMinCol + 2 && affectedCol < width - 1) {
-                  energy[(r - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, r - 1, affectedCol, width - 1, height);
+                  energy[(r - 1) * WIDTH + affectedCol] = measurePixelEnergy(grayPixels, r - 1, affectedCol, width - 1, height);
                   affectedCol += 1;
               }
           }
@@ -195,12 +193,12 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
               prevMinCol = minCol;
 
               int belowIdx = (r + 1) * WIDTH + minCol;
-              int min = minimalEnergy[belowIdx], minColCpy = minCol;
-              if (minColCpy > 0 && minimalEnergy[belowIdx - 1] < min) {
-                  min = minimalEnergy[belowIdx - 1];
+              int min = minEnergy[belowIdx], minColCpy = minCol;
+              if (minColCpy > 0 && minEnergy[belowIdx - 1] < min) {
+                  min = minEnergy[belowIdx - 1];
                   minCol = minColCpy - 1;
               }
-              if (minColCpy < width - 1 && minimalEnergy[belowIdx + 1] < min) {
+              if (minColCpy < width - 1 && minEnergy[belowIdx + 1] < min) {
                   minCol = minColCpy + 1;
               }
           }
@@ -208,7 +206,7 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
 
       int affectedCol;
       for (affectedCol = max(0, minCol - 2); affectedCol <= minCol + 2 && affectedCol < width - 1; ++affectedCol) {
-          energy[(height - 1) * WIDTH + affectedCol] = getPixelEnergy(grayPixels, height - 1, affectedCol, width - 1, height);
+          energy[(height - 1) * WIDTH + affectedCol] = measurePixelEnergy(grayPixels, height - 1, affectedCol, width - 1, height);
       }
 
       --width;
@@ -217,7 +215,7 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
 
     // Free dynamically allocated memory
     free(grayPixels);
-    free(minimalEnergy);
+    free(minEnergy);
     free(energy);
 
     // Stop the timer and print the execution time for the host function
@@ -227,7 +225,7 @@ void hostSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, 
 
 
 // Device
-__global__ void convertRgb2GrayKernel(uchar3 *inPixels, int width, int height, uint8_t *outPixels) {
+__global__ void kernelRgbToGray(uchar3 *inPixels, int width, int height, uint8_t *outPixels) {
     // Calculate the indices in the image for processing
     int r = blockIdx.y * blockDim.y + threadIdx.y; // Row index
     int c = blockIdx.x * blockDim.x + threadIdx.x; // Column index
@@ -293,17 +291,17 @@ __global__ void calEnergy(uint8_t *inPixels, int width, int height, int *energy)
 }
 
 
-__global__ void calculateEnergyUpwardsKernel(int *energy, int *minimalEnergy, int width, int height, int fromRow) {
+__global__ void calEnergyUpsKernel(int *energy, int *minEnergy, int width, int height, int fromRow) {
     size_t halfBlock = blockDim.x >> 1; // Half the block size
 
     int col = blockIdx.x * halfBlock - halfBlock + threadIdx.x; // Calculate column index
 
     if (fromRow == height - 1 && col < width) {
-        minimalEnergy[fromRow * width + col] = energy[fromRow * width + col]; // Copy bottom row's energy to minimalEnergy
+        minEnergy[fromRow * width + col] = energy[fromRow * width + col]; // Copy bottom row's energy to minEnergy
     }
     __syncthreads(); // Synchronize threads after copying bottom row
 
-    // Iterative computation of minimal energy upwards
+    // Interative computation of minimal energy upwards
     for (int stride = fromRow != height - 1 ? 0 : 1; stride < halfBlock && fromRow - stride >= 0; ++stride) {
         if (threadIdx.x < blockDim.x - (stride << 1)) {
             int curRow = fromRow - stride;
@@ -314,19 +312,19 @@ __global__ void calculateEnergyUpwardsKernel(int *energy, int *minimalEnergy, in
                 int idx = curRow * d_WIDTH + curCol;
                 int belowIdx = (curRow + 1) * d_WIDTH + curCol;
 
-                int min = minimalEnergy[belowIdx]; // Initialize minimum energy with the pixel below
+                int min = minEnergy[belowIdx]; // Initialize minimum energy with the pixel below
 
                 // Update minimum energy by considering neighboring pixels below
-                if (curCol > 0 && minimalEnergy[belowIdx - 1] < min)
-                    min = minimalEnergy[belowIdx - 1];
+                if (curCol > 0 && minEnergy[belowIdx - 1] < min)
+                    min = minEnergy[belowIdx - 1];
                 
-                if (curCol < width - 1 && minimalEnergy[belowIdx + 1] < min)
-                    min = minimalEnergy[belowIdx + 1];
+                if (curCol < width - 1 && minEnergy[belowIdx + 1] < min)
+                    min = minEnergy[belowIdx + 1];
                 
-                minimalEnergy[idx] = min + energy[idx]; // Update minimalEnergy for the current pixel
+                minEnergy[idx] = min + energy[idx]; // Update minEnergy for the current pixel
             }
         }
-        __syncthreads(); // Synchronize threads after updating minimalEnergy
+        __syncthreads(); // Synchronize threads after updating minEnergy
     }
 }
 
@@ -351,41 +349,112 @@ __global__ void energyToColorKernel(int *energy, uchar3 *colorPic, int width, in
 }
 
 __global__ void carvingKernel(int * leastSignificantPixel, uchar3 * outPixels, uint8_t *grayPixels, int * energy, int width) {
+    __shared__ uchar3 sharedOutPixels[BLOCK_SIZE];
+    __shared__ uint8_t sharedGrayPixels[BLOCK_SIZE];
+    __shared__ int sharedEnergy[BLOCK_SIZE];
+
     int row = blockIdx.x;
     int baseIdx = row * d_WIDTH;
-    for (int i = leastSignificantPixel[row]; i < width - 1; ++i) {
-        outPixels[baseIdx + i] = outPixels[baseIdx + i + 1];
-        grayPixels[baseIdx + i] = grayPixels[baseIdx + i + 1];
-        energy[baseIdx + i] = energy[baseIdx + i + 1];
+    int leastSignificant = leastSignificantPixel[row];
+
+
+    for (int i = leastSignificant + threadIdx.x; i < width - 1; i += blockDim.x) {
+        int idx = baseIdx + i;
+
+        // Copy a row of data into shared memory
+        sharedOutPixels[threadIdx.x] = outPixels[idx + 1];
+        sharedGrayPixels[threadIdx.x] = grayPixels[idx + 1];
+        sharedEnergy[threadIdx.x] = energy[idx + 1];
+
+        // Compute values for the current row using the shared data
+        if (i < width - 1) {
+            outPixels[idx] = sharedOutPixels[threadIdx.x];
+            grayPixels[idx] = sharedGrayPixels[threadIdx.x];
+            energy[idx] = sharedEnergy[threadIdx.x];
+        }
     }
 }
 
-void findSeam(int * minimalEnergy, int *leastSignificantPixel, int width, int height) {
+
+void findSeam(int * minEnergy, int *leastSignificantPixel, int width, int height) {
     int minCol = 0, r = 0; 
 
     for (int c = 1; c < width; ++c)
-        if (minimalEnergy[r * WIDTH + c] < minimalEnergy[r * WIDTH + minCol])
+        if (minEnergy[r * WIDTH + c] < minEnergy[r * WIDTH + minCol])
             minCol = c;
     
     for (; r < height; ++r) { 
         leastSignificantPixel[r] = minCol;
         if (r < height - 1) { 
             int belowIdx = (r + 1) * WIDTH + minCol;
-            int min = minimalEnergy[belowIdx], minColCpy = minCol;
+            int min = minEnergy[belowIdx], minColCpy = minCol;
 
-            if (minColCpy > 0 && minimalEnergy[belowIdx - 1] < min) {
-                min = minimalEnergy[belowIdx - 1];
+            if (minColCpy > 0 && minEnergy[belowIdx - 1] < min) {
+                min = minEnergy[belowIdx - 1];
                 minCol = minColCpy - 1;
             }
-            if (minColCpy < width - 1 && minimalEnergy[belowIdx + 1] < min) {
+            if (minColCpy < width - 1 && minEnergy[belowIdx + 1] < min) {
                 minCol = minColCpy + 1;
             }
         }
     }
 }
 
+__global__ void findSeamKernel(int * minEnergy, int * leastSignificantPixel, int width, int height) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x; // tính toán chỉ số cột tương ứng với thread
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // tính toán chỉ số hàng tương ứng với thread
 
-void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth, uchar3 *outPixels, dim3 blockSize, uchar3 *outPixelsColor) {
+    if (col >= width) return; // nếu chỉ số cột vượt quá kích thước ảnh, thoát
+
+    __shared__ int minCol; 
+    __shared__ int minEnergy; 
+    __shared__ int belowIdx; 
+    __shared__ int minColCpy; 
+    __shared__ int idx; 
+
+    int r = 0;
+
+    if (row == 0) { 
+        minCol = 0;
+        minEnergy = minEnergy[r * d_WIDTH];
+        for (int c = 1; c < width; ++c) {
+            idx = r * d_WIDTH + c;
+            if (minEnergy[idx] < minEnergy) {
+                minEnergy = minEnergy[idx];
+                minCol = c;
+            }
+        }
+    }
+
+
+    for (; r < height; ++r) {
+        leastSignificantPixel[r] = minCol;
+
+
+        if (r < height - 1) {
+            belowIdx = (r + 1) * d_WIDTH + minCol;
+            minEnergy = minEnergy[belowIdx];
+            minColCpy = minCol;
+
+            if (minColCpy > 0) {
+                idx = belowIdx - 1;
+                if (minEnergy[idx] < minEnergy) {
+                    minEnergy = minEnergy[idx];
+                    minCol = minColCpy - 1;
+                }
+            }
+
+            if (minColCpy < width - 1) {
+                idx = belowIdx + 1;
+                if (minEnergy[idx] < minEnergy) {
+                    minCol = minColCpy + 1;
+                }
+            }
+        }
+    }
+}
+
+void seamCarveDevice(uchar3 *inPixels, int width, int height, int targetedWidth, uchar3 *outPixels, dim3 blockSize, uchar3 *outPixelsColor) {
     // GPU timer initialization
     GpuTimer timer;
     timer.Start();
@@ -407,7 +476,7 @@ void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth
     // Host memory allocation
     int *energy = (int *)malloc(width * height * sizeof(int));
     int * leastSignificantPixel = (int *)malloc(height * sizeof(int));
-    int *minimalEnergy = (int *)malloc(width * height * sizeof(int));
+    int *minEnergy = (int *)malloc(width * height * sizeof(int));
 
     // Dynamic shared memory size for energy computation
     size_t smemSize = ((blockSize.x + 3 - 1) * (blockSize.y + 3 - 1)) * sizeof(uint8_t);
@@ -438,7 +507,7 @@ void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth
     free(tempPixels);
     free(grayPixels);
 
-    while (width > desiredWidth) {
+    while (width > targetedWidth) {
         // update energy
         calEnergy<<<gridSize, blockSize, smemSize>>>(d_grayPixels, width, height, d_energy);
         cudaDeviceSynchronize();
@@ -446,18 +515,17 @@ void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth
 
         // Compute minimal seam table upwards in parallel
         for (int i = height - 1; i >= 0; i -= (stripHeight >> 1)) {
-            calculateEnergyUpwardsKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
+            calEnergyUpsKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
             cudaDeviceSynchronize();
             CHECK(cudaGetLastError());
         }
-        
 
-        // find least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
-        CHECK(cudaMemcpy(minimalEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
-        findSeam(minimalEnergy, leastSignificantPixel, width, height);
+        int numThreadsPerBlock = 256;
+        int numBlocks = (width + numThreadsPerBlock - 1) / numThreadsPerBlock;
+        findSeamKernel<<<numBlocks, numThreadsPerBlock>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
 
-        // carve
-        CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
         carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
@@ -478,7 +546,7 @@ void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth
     CHECK(cudaFree(d_minimalEnergy));
 
     // Free host memory
-    free(minimalEnergy);
+    free(minEnergy);
     free(leastSignificantPixel);
     free(energy);
 
@@ -489,32 +557,32 @@ void deviceSeamCarving(uchar3 *inPixels, int width, int height, int desiredWidth
 
 // Main
 int main(int argc, char **argv) {
-    int width, height, desiredWidth;
+    int width, height, targetedWidth;
     uchar3 *inPixels;
     dim3 blockSize(32, 32);
 
     // Check user's input
-    checkInput(argc, argv, width, height, inPixels, desiredWidth, blockSize);
+    checkInput(argc, argv, width, height, inPixels, targetedWidth, blockSize);
 
     // HOST: Perform energy calculation and color transformation on the CPU (host)
     uchar3 *out_host = (uchar3 *)malloc(width * height * sizeof(uchar3));
     uchar3 *out_host_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    hostSeamCarving(inPixels, width, height, desiredWidth, out_host, out_host_color);
+    seamCarveHost(inPixels, width, height, targetedWidth, out_host, out_host_color);
 
     // DEVICE: Perform energy calculation and color transformation on the GPU (device)
     uchar3 *out_device = (uchar3 *)malloc(width * height * sizeof(uchar3));
     uchar3 *out_device_color = (uchar3 *)malloc(width * height * sizeof(uchar3));
-    deviceSeamCarving(inPixels, width, height, desiredWidth, out_device, blockSize, out_device_color);
+    seamCarveDevice(inPixels, width, height, targetedWidth, out_device, blockSize, out_device_color);
 
     // Compute error between device and host results
-    printError((char *)"Error between device result and host result: ", out_host, out_device, desiredWidth, height);
+    printError((char *)"Error between device result and host result: ", out_host, out_device, targetedWidth, height);
 
     // Write results to files
-    printf("\nImage output size (width x height) host: %i x %i\n", desiredWidth, height);
-    writePnm(out_host, desiredWidth, height, width, concatStr(argv[2], "_host.pnm"));
+    printf("\nImage output size (width x height) host: %i x %i\n", targetedWidth, height);
+    writePnm(out_host, targetedWidth, height, width, concatStr(argv[2], "_host.pnm"));
 
-    printf("\nImage output size (width x height) device: %i x %i\n", desiredWidth, height);
-    writePnm(out_device, desiredWidth, height, width, concatStr(argv[2], "_device.pnm"));
+    printf("\nImage output size (width x height) device: %i x %i\n", targetedWidth, height);
+    writePnm(out_device, targetedWidth, height, width, concatStr(argv[2], "_device.pnm"));
 
     // Free allocated memory
     free(inPixels);

@@ -25,7 +25,7 @@ void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixel
         exit(EXIT_FAILURE);
     }
 
-    // Read the file
+    // Read file
     readPnm(argv[1], width, height, inPixels);
     printf("Image size (width x height): %i x %i\n\n", width, height);
 
@@ -301,7 +301,7 @@ __global__ void calEnergyUpsKernel(int *energy, int *minEnergy, int width, int h
     }
     __syncthreads(); // Synchronize threads after copying bottom row
 
-    // Interative computation of minimal energy upwards
+    // Iterative computation of minimal energy upwards
     for (int stride = fromRow != height - 1 ? 0 : 1; stride < halfBlock && fromRow - stride >= 0; ++stride) {
         if (threadIdx.x < blockDim.x - (stride << 1)) {
             int curRow = fromRow - stride;
@@ -500,10 +500,12 @@ void seamCarveDevice(uchar3 *inPixels, int width, int height, int targetedWidth,
             calEnergyUpsKernel<<<gridSizeDp, blockSizeDp>>>(d_energy, d_minimalEnergy, width, height, i);
         }
 
-        int numThreadsPerBlock = 256;
-        int numBlocks = (width + numThreadsPerBlock - 1) / numThreadsPerBlock;
-        findSeamKernel<<<numBlocks, numThreadsPerBlock>>>(d_minimalEnergy, d_leastSignificantPixel, width, height);
+        // Find the least significant pixel index of each row and store in d_leastSignificantPixel (SEQUENTIAL, in kernel or host)
+        CHECK(cudaMemcpy(minEnergy, d_minimalEnergy, WIDTH * height * sizeof(int), cudaMemcpyDeviceToHost));
+        findSeam(minEnergy, leastSignificantPixel, width, height);
 
+        // carve
+        CHECK(cudaMemcpy(d_leastSignificantPixel, leastSignificantPixel, height * sizeof(int), cudaMemcpyHostToDevice));
         carvingKernel<<<height, 1>>>(d_leastSignificantPixel, d_inPixels, d_grayPixels, d_energy, width);
         --width;
     }
