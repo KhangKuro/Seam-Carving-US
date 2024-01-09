@@ -380,11 +380,11 @@ void findSeam(int * minEnergy, int *leastSignificantPixel, int width, int height
     }
 }
 
-__global__ void findSeamKernel(int * minEnergy, int * leastSignificantPixel, int width, int height) {
-    int col = blockIdx.x * blockDim.x + threadIdx.x; // tính toán chỉ số cột tương ứng với thread
-    int row = blockIdx.y * blockDim.y + threadIdx.y; // tính toán chỉ số hàng tương ứng với thread
+__global__ void findSeamKernel(int * minimalEnergy, int * leastSignificantPixel, int width, int height) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x; 
+    int row = blockIdx.y * blockDim.y + threadIdx.y; 
 
-    if (col >= width) return; // nếu chỉ số cột vượt quá kích thước ảnh, thoát
+    if (col >= width) return; 
 
     __shared__ int minCol; 
     __shared__ int minEnergy; 
@@ -396,11 +396,11 @@ __global__ void findSeamKernel(int * minEnergy, int * leastSignificantPixel, int
 
     if (row == 0) { 
         minCol = 0;
-        minEnergy = minEnergy[r * d_WIDTH];
+        minEnergy = minimalEnergy[r * d_WIDTH];
         for (int c = 1; c < width; ++c) {
             idx = r * d_WIDTH + c;
-            if (minEnergy[idx] < minEnergy) {
-                minEnergy = minEnergy[idx];
+            if (minimalEnergy[idx] < minEnergy) {
+                minEnergy = minimalEnergy[idx];
                 minCol = c;
             }
         }
@@ -413,20 +413,20 @@ __global__ void findSeamKernel(int * minEnergy, int * leastSignificantPixel, int
 
         if (r < height - 1) {
             belowIdx = (r + 1) * d_WIDTH + minCol;
-            minEnergy = minEnergy[belowIdx];
+            minEnergy = minimalEnergy[belowIdx];
             minColCpy = minCol;
 
             if (minColCpy > 0) {
                 idx = belowIdx - 1;
-                if (minEnergy[idx] < minEnergy) {
-                    minEnergy = minEnergy[idx];
+                if (minimalEnergy[idx] < minEnergy) {
+                    minEnergy = minimalEnergy[idx];
                     minCol = minColCpy - 1;
                 }
             }
 
             if (minColCpy < width - 1) {
                 idx = belowIdx + 1;
-                if (minEnergy[idx] < minEnergy) {
+                if (minimalEnergy[idx] < minEnergy) {
                     minCol = minColCpy + 1;
                 }
             }
