@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
-#include "library.h"
+#include "./src/library.h"
 using namespace std;
 
 // Global variables
@@ -23,8 +23,6 @@ void checkInput(int argc, char **argv, int &width, int &height, uchar3 *&inPixel
     printf("Image size (width x height): %i x %i\n\n", width, height);
 
     WIDTH = width; // Assigning width
-    CHECK(cudaMemcpyToSymbol(d_WIDTH, &width, sizeof(int))); // Copy width to device constant
-
     // Check user's desired width
     desiredWidth = atoi(argv[3]); // Convert user input to integer
 
@@ -236,12 +234,14 @@ int main(int argc, char **argv) {
     hostSeamCarving(inPixels, width, height, desiredWidth, out_host, out_host_color);
 
     // Write results to files
+    printf("\nImage color energy output size (width x height): %i x %i\n", width, height);
     writePnm(out_host_color, width, height, width, concatStr(argv[2], "_energy_host.pnm"));
+
+    printf("\nImage output size (width x height): %i x %i\n", desiredWidth, height);
     writePnm(out_host, desiredWidth, height, width, concatStr(argv[2], "_host.pnm"));
 
     // Free allocated memory
     free(inPixels);
     free(out_host);
-    free(out_device);
 }
 
